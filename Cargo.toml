@@ -22,7 +22,7 @@ base64 = "0.22.1"
 # The agent is the window manager, the screenshotter, the screen streamer and
 # the person's hands, so it talks X11 itself: XGetImage, EWMH, the redirect of
 # every map and configure, DAMAGE for what changed, XTEST for input.
-x11rb = { version = "=0.14.0", default-features = false, features = ["damage", "xtest"] }
+x11rb = { version = "=0.14.0", default-features = false, features = ["damage", "shm", "xtest"] }
 # Odilia's protocol crate is the typed route to the desktop accessibility tree.
 atspi = { version = "=0.30.0", default-features = false, features = ["proxies", "tokio", "zbus"] }
 # Chromium is visible on the desktop while this drives its DevTools protocol.

@@ -2,12 +2,23 @@
 //!
 //! X DAMAGE reports the rectangles that changed on the root window, so an
 //! idle desktop costs nothing and a busy one costs only the pixels that
-//! moved. One thread owns the connection, unions the reports, and at most
+//! moved. One thread owns the connections, unions the reports, and at most
 //! twenty times a second reads the dirty rectangle, encodes it, and hands it
 //! to every viewer. A viewer that just arrived, or fell behind, gets the
 //! whole screen next. With nobody watching, damage is cleared and nothing is
 //! read or encoded.
+//!
+//! Events and pixels travel on separate connections. Reading the screen with
+//! GetImage on the connection that receives DamageNotify is not safe: the
+//! server removes its software cursor from the framebuffer while it serves
+//! GetImage, that is damage, and the event lands in the middle of the reply.
+//! The client then loses the sequence numbers and waits forever. So damage
+//! arrives on one connection and pixels are fetched on another, through
+//! MIT-SHM into a memory file the server writes directly, or by GetImage
+//! when the extension is missing. If a connection still fails, the stream is
+//! reopened and viewers see the whole screen again.
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -16,14 +27,18 @@ use tokio::sync::broadcast;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::damage::{ConnectionExt as _, ReportLevel};
-use x11rb::protocol::xproto::Rectangle;
+use x11rb::protocol::shm::ConnectionExt as _;
+use x11rb::protocol::xproto::{ImageFormat, Rectangle, Screen as XScreen};
+use x11rb::rust_connection::RustConnection;
 
-use crate::x11;
+use crate::x11::{self, Screenshot};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL: Duration = Duration::from_millis(10);
 /// Frames a slow viewer may fall behind by before it is sent the whole screen.
 const BACKLOG: usize = 8;
+/// How long the stream waits before reopening after its connection failed.
+const REOPEN_DELAY: Duration = Duration::from_secs(1);
 
 pub struct Frame {
     pub x: u16,
@@ -73,8 +88,15 @@ impl Screen {
         std::thread::Builder::new()
             .name("screen".to_owned())
             .spawn(move || {
-                if let Err(error) = stream(&display, &streamer) {
-                    eprintln!("toad-computer: screen: {error}");
+                loop {
+                    match stream(&display, &streamer) {
+                        Ok(()) => return,
+                        Err(error) => {
+                            eprintln!("toad-computer: screen: {error}; reopening the stream");
+                        }
+                    }
+                    std::thread::sleep(REOPEN_DELAY);
+                    streamer.full.store(true, Ordering::SeqCst);
                 }
             })
             .map_err(|error| format!("spawn screen thread: {error}"))?;
@@ -94,32 +116,31 @@ impl Screen {
 }
 
 fn stream(display: &str, screen: &Screen) -> Result<(), String> {
-    let (connection, screen_number) =
+    let (events, screen_number) =
         x11rb::connect(Some(display)).map_err(|error| format!("x11 connect: {error}"))?;
-    let root_screen = connection.setup().roots[screen_number].clone();
+    let root_screen = events.setup().roots[screen_number].clone();
     let whole = Rectangle {
         x: 0,
         y: 0,
         width: root_screen.width_in_pixels,
         height: root_screen.height_in_pixels,
     };
-    connection
+    events
         .damage_query_version(1, 1)
         .map_err(|error| error.to_string())?
         .reply()
         .map_err(|error| format!("DAMAGE: {error}"))?;
-    let damage = connection
-        .generate_id()
-        .map_err(|error| error.to_string())?;
-    connection
+    let damage = events.generate_id().map_err(|error| error.to_string())?;
+    events
         .damage_create(damage, root_screen.root, ReportLevel::BOUNDING_BOX)
         .map_err(|error| error.to_string())?;
-    connection.flush().map_err(|error| error.to_string())?;
+    events.flush().map_err(|error| error.to_string())?;
+    let mut capture = Capture::open(display, &whole)?;
 
     let mut dirty: Option<Rectangle> = None;
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
     loop {
-        while let Some(event) = connection
+        while let Some(event) = events
             .poll_for_event()
             .map_err(|error| format!("display connection lost: {error}"))?
         {
@@ -133,10 +154,10 @@ fn stream(display: &str, screen: &Screen) -> Result<(), String> {
             continue;
         }
         // Cleared before the read: anything drawn from here on is the next frame's.
-        connection
+        events
             .damage_subtract(damage, x11rb::NONE, x11rb::NONE)
             .map_err(|error| error.to_string())?;
-        connection.flush().map_err(|error| error.to_string())?;
+        events.flush().map_err(|error| error.to_string())?;
         let full = screen.full.swap(false, Ordering::SeqCst);
         let region = if full {
             whole
@@ -148,14 +169,7 @@ fn stream(display: &str, screen: &Screen) -> Result<(), String> {
         if screen.frames.receiver_count() == 0 {
             continue;
         }
-        let shot = x11::grab(
-            &connection,
-            &root_screen,
-            region.x,
-            region.y,
-            region.width,
-            region.height,
-        )?;
+        let shot = capture.grab(region)?;
         let png = x11::encode_png(
             shot.width,
             shot.height,
@@ -173,6 +187,152 @@ fn stream(display: &str, screen: &Screen) -> Result<(), String> {
         }));
     }
 }
+
+/// The connection pixels come over. It selects no events, so nothing can
+/// land inside a reply.
+struct Capture {
+    connection: RustConnection,
+    root_screen: XScreen,
+    shared: Option<Shared>,
+}
+
+impl Capture {
+    fn open(display: &str, whole: &Rectangle) -> Result<Self, String> {
+        let (connection, screen_number) =
+            x11rb::connect(Some(display)).map_err(|error| format!("x11 connect: {error}"))?;
+        let root_screen = connection.setup().roots[screen_number].clone();
+        let bytes = usize::from(whole.width) * usize::from(whole.height) * 4;
+        let shared = match Shared::attach(&connection, bytes) {
+            Ok(shared) => Some(shared),
+            Err(error) => {
+                eprintln!(
+                    "toad-computer: screen: MIT-SHM unavailable ({error}); reading the screen over the socket"
+                );
+                None
+            }
+        };
+        Ok(Self {
+            connection,
+            root_screen,
+            shared,
+        })
+    }
+
+    fn grab(&mut self, region: Rectangle) -> Result<Screenshot, String> {
+        let Some(shared) = &self.shared else {
+            return x11::grab(
+                &self.connection,
+                &self.root_screen,
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+            );
+        };
+        let reply = self
+            .connection
+            .shm_get_image(
+                self.root_screen.root,
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+                u32::MAX,
+                u8::from(ImageFormat::Z_PIXMAP),
+                shared.segment,
+                0,
+            )
+            .map_err(|error| format!("ShmGetImage: {error}"))?
+            .reply()
+            .map_err(|error| format!("ShmGetImage: {error}"))?;
+        let size = reply.size as usize;
+        if size > shared.len {
+            return Err(format!(
+                "ShmGetImage wrote {size} bytes into a {} byte segment",
+                shared.len
+            ));
+        }
+        // The server has finished writing when its reply arrives; the mapping
+        // is ours alone until the next request.
+        let data = unsafe { std::slice::from_raw_parts(shared.map, size) };
+        x11::unpack(
+            self.connection.setup(),
+            reply.depth,
+            region.width,
+            region.height,
+            data,
+        )
+    }
+}
+
+/// A memory file both sides have mapped: the server writes pixels into it
+/// on ShmGetImage and only a 32-byte reply crosses the socket.
+struct Shared {
+    segment: u32,
+    map: *mut u8,
+    len: usize,
+    _file: OwnedFd,
+}
+
+impl Shared {
+    fn attach(connection: &RustConnection, len: usize) -> Result<Self, String> {
+        connection
+            .shm_query_version()
+            .map_err(|error| error.to_string())?
+            .reply()
+            .map_err(|error| error.to_string())?;
+        let raw = unsafe { libc::memfd_create(c"toad-screen".as_ptr(), libc::MFD_CLOEXEC) };
+        if raw < 0 {
+            return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
+        }
+        let file = unsafe { OwnedFd::from_raw_fd(raw) };
+        if unsafe { libc::ftruncate(file.as_raw_fd(), len as libc::off_t) } < 0 {
+            return Err(format!("ftruncate: {}", std::io::Error::last_os_error()));
+        }
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+        }
+        let shared = Self {
+            segment: connection
+                .generate_id()
+                .map_err(|error| error.to_string())?,
+            map: map.cast::<u8>(),
+            len,
+            _file: file,
+        };
+        let for_server = shared
+            ._file
+            .try_clone()
+            .map_err(|error| format!("dup: {error}"))?;
+        connection
+            .shm_attach_fd(shared.segment, for_server, false)
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| format!("ShmAttachFd: {error}"))?;
+        Ok(shared)
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.map.cast(), self.len);
+        }
+    }
+}
+
+// The mapping is only ever touched from the screen thread.
+unsafe impl Send for Shared {}
 
 fn union(current: Option<Rectangle>, added: Rectangle) -> Rectangle {
     let Some(current) = current else {

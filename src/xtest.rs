@@ -181,6 +181,9 @@ impl Hands {
     }
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<(), String> {
+        // MappingNotify reaches every client; unread, it would pile up in the
+        // socket for the life of the session.
+        while let Ok(Some(_)) = self.connection.poll_for_event() {}
         self.connection
             .xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, self.root, x, y, 0)
             .map_err(|error| error.to_string())?;

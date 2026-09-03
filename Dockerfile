@@ -38,7 +38,7 @@ RUN wget -q -O xorg-server.tar.xz \
         -Dpciaccess=false -Dint10=false -Dvgahw=false -Ddga=false \
         -Dxv=false -Dxvmc=false -Dxselinux=false \
         -Ddocs=false -Ddevel-docs=false -Ddocs-pdf=false \
-        -Dsha1=libmd -Ddefault_font_path=built-ins \
+        -Dsha1=libmd -Ddefault_font_path=built-ins -Dmitshm=true \
         -Dxkb_dir=/usr/share/X11/xkb -Dxkb_bin_dir=/usr/bin -Dxkb_output_dir=/tmp \
     && ninja -C build hw/vfb/Xvfb \
     && strip build/hw/vfb/Xvfb

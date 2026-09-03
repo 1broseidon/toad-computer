@@ -4,7 +4,7 @@ use serde::Serialize;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageData, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask,
-    ImageFormat, MapState, Screen, Window as XWindow,
+    ImageFormat, MapState, Screen, Setup, Window as XWindow,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -59,12 +59,22 @@ pub fn grab<C: Connection>(
         .map_err(|error| format!("XGetImage: {error}"))?
         .reply()
         .map_err(|error| format!("XGetImage: {error}"))?;
-    let format = connection
-        .setup()
+    unpack(connection.setup(), reply.depth, width, height, &reply.data)
+}
+
+/// ZPixmap bytes at the server's depth, as RGBA.
+pub fn unpack(
+    setup: &Setup,
+    depth: u8,
+    width: u16,
+    height: u16,
+    data: &[u8],
+) -> Result<Screenshot, String> {
+    let format = setup
         .pixmap_formats
         .iter()
-        .find(|format| format.depth == reply.depth)
-        .ok_or_else(|| format!("x11: no pixel format for depth {}", reply.depth))?;
+        .find(|format| format.depth == depth)
+        .ok_or_else(|| format!("x11: no pixel format for depth {depth}"))?;
     let bytes_per_pixel = usize::from(format.bits_per_pixel / 8);
     if bytes_per_pixel < 3 {
         return Err(format!(
@@ -75,7 +85,7 @@ pub fn grab<C: Connection>(
     let width = usize::from(width);
     let height = usize::from(height);
     let stride = (width * usize::from(format.bits_per_pixel)).div_ceil(32) * 4;
-    if reply.data.len() < stride * height {
+    if data.len() < stride * height {
         return Err("x11: image reply was shorter than the rectangle".to_owned());
     }
     let mut rgba = vec![0_u8; width * height * 4];
@@ -83,9 +93,9 @@ pub fn grab<C: Connection>(
         for column in 0..width {
             let source = row * stride + column * bytes_per_pixel;
             let target = (row * width + column) * 4;
-            rgba[target] = reply.data[source + 2];
-            rgba[target + 1] = reply.data[source + 1];
-            rgba[target + 2] = reply.data[source];
+            rgba[target] = data[source + 2];
+            rgba[target + 1] = data[source + 1];
+            rgba[target + 2] = data[source];
             rgba[target + 3] = 255;
         }
     }

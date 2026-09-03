@@ -326,6 +326,48 @@ async fn image_honors_the_computer_contract() {
         "the first frame is the whole screen"
     );
     assert_eq!(&bytes[12..16], b"\x89PNG", "the frame is a PNG");
+
+    // The pointer sits in the browser window, so the server's software
+    // cursor is inside every captured rectangle, and pages keep repainting.
+    // The stream must keep flowing: a DamageNotify the cursor causes during
+    // a read once landed inside the GetImage reply and froze it for good.
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::text(
+            json!({"t":"move","x":960,"y":540}).to_string(),
+        ))
+        .await
+        .expect("send move");
+    for page in ["one", "two", "three"] {
+        call(
+            &client,
+            "browser",
+            json!({"action":"navigate","url":format!("data:text/html,<title>Typing</title><h1 style=font-size:160px>{page}</h1><textarea id=t autofocus></textarea>")}),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let mut later = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while later < 3 && tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(message))) =
+            tokio::time::timeout(Duration::from_secs(1), socket.next()).await
+            && message.is_binary()
+        {
+            later += 1;
+        }
+    }
+    assert!(
+        later >= 3,
+        "frames keep flowing while the cursor is in the captured region: got {later}"
+    );
+    // Focus the textarea for the keystroke below.
+    call(
+        &client,
+        "browser",
+        json!({"action":"eval","js":"document.getElementById('t').focus()"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     for down in [true, false] {
         socket
             .send(tokio_tungstenite::tungstenite::Message::text(
