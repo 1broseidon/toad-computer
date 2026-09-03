@@ -111,12 +111,34 @@ impl BrowserManager {
             .viewport(None)
             .user_data_dir(profile)
             .env("DISPLAY", self.config.display.clone())
-            .arg("disable-gpu")
-            .arg("disable-software-rasterizer")
-            .arg("no-first-run")
-            .arg("no-default-browser-check")
-            // Chromium does not expose its tree to AT-SPI until accessibility is forced.
-            .arg("force-renderer-accessibility")
+            // chromiumoxide's own defaults are a test harness's: they include
+            // `--enable-automation`, which sets `navigator.webdriver`, hangs a
+            // banner over every page, and is the first thing a site checks
+            // before deciding a visitor is a script. This is a person's desktop
+            // browser that the agent also drives, so it starts the way a
+            // desktop Chromium does, and DevTools is just a port.
+            .disable_default_args()
+            .args([
+                // Chromium does not expose its tree to AT-SPI until forced.
+                "force-renderer-accessibility",
+                "disable-blink-features=AutomationControlled",
+                "disable-gpu",
+                "disable-software-rasterizer",
+                "no-first-run",
+                "no-default-browser-check",
+                "no-session-restore",
+                "hide-crash-restore-bubble",
+                "disable-background-networking",
+                "metrics-recording-only",
+                "disable-breakpad",
+                "disable-features=TranslateUI",
+                "password-store=basic",
+                "lang=en-US",
+                // Without it Chromium hangs an "unsupported flag" bar over
+                // the page for `--no-sandbox`, which the dropped capabilities
+                // make necessary.
+                "test-type",
+            ])
             .build()
             .map_err(|error| format!("browser: {error}"))?;
         let (browser, mut handler) = Browser::launch(browser_config)
@@ -174,7 +196,9 @@ impl BrowserManager {
                     element.setAttribute('data-toad-ref', ref);
                     const tag = element.tagName.toLowerCase();
                     const role = element.getAttribute('role') || ({a:'link',button:'button',input:element.type || 'input',select:'combobox',textarea:'textbox'}[tag] || tag);
-                    const name = element.getAttribute('aria-label') || element.innerText || element.value || element.placeholder || '';
+                    const byId = (ids) => (ids || '').split(/\s+/).map(id => document.getElementById(id)).filter(Boolean).map(e => e.innerText).join(' ');
+                    const labels = element.labels ? [...element.labels].map(l => l.innerText).join(' ') : '';
+                    const name = element.getAttribute('aria-label') || byId(element.getAttribute('aria-labelledby')) || labels || element.innerText || element.value || element.placeholder || element.title || element.name || '';
                     if (name.trim()) lines.push(`[${ref}] [${role}] ${name.trim().replace(/\s+/g, ' ')}`);
                 }
                 const body = document.body ? document.body.innerText.trim() : '';
@@ -231,15 +255,33 @@ impl BrowserManager {
         .await
     }
 
+    /// Typed, not assigned. A value written from script is invisible to a
+    /// framework that tracks the field's value itself, so the form still says
+    /// the field is empty; key events are what every page accepts.
     pub async fn fill(&self, reference: &str, text: &str) -> Result<String, String> {
-        self.element_script(
-            reference,
-            &format!(
-                "function(){{this.focus();this.value={};this.dispatchEvent(new Event('input',{{bubbles:true}}));this.dispatchEvent(new Event('change',{{bubbles:true}}));}}",
-                json!(text)
-            ),
-            format!("filled {reference}"),
-        )
+        let selector = ref_selector(reference)?;
+        let reference = reference.to_owned();
+        let text = text.to_owned();
+        self.with_session(|session| {
+            Box::pin(async move {
+                let page = current_page(session).await?;
+                let element = page.find_element(selector).await.map_err(browser_error)?;
+                element.focus().await.map_err(browser_error)?;
+                element
+                    .call_js_fn(
+                        "function(){ if (typeof this.select === 'function') this.select(); else if (this.isContentEditable) document.execCommand('selectAll'); }",
+                        false,
+                    )
+                    .await
+                    .map_err(browser_error)?;
+                if text.is_empty() {
+                    element.press_key("Delete").await.map_err(browser_error)?;
+                } else {
+                    element.type_str(&text).await.map_err(browser_error)?;
+                }
+                Ok(format!("filled {reference}"))
+            })
+        })
         .await
     }
 
