@@ -4,7 +4,7 @@ use serde::Serialize;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask, ImageFormat,
-    MapState, Window as XWindow,
+    MapState, Screen, Window as XWindow,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -26,14 +26,33 @@ pub fn screenshot(display: &str) -> Result<Screenshot, String> {
     let (connection, screen_number) =
         x11rb::connect(Some(display)).map_err(|error| format!("x11 connect: {error}"))?;
     let screen = &connection.setup().roots[screen_number];
+    grab(
+        &connection,
+        screen,
+        0,
+        0,
+        screen.width_in_pixels,
+        screen.height_in_pixels,
+    )
+}
+
+/// The pixels of one rectangle of the root window, as RGBA.
+pub fn grab<C: Connection>(
+    connection: &C,
+    screen: &Screen,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+) -> Result<Screenshot, String> {
     let reply = connection
         .get_image(
             ImageFormat::Z_PIXMAP,
             screen.root,
-            0,
-            0,
-            screen.width_in_pixels,
-            screen.height_in_pixels,
+            x,
+            y,
+            width,
+            height,
             u32::MAX,
         )
         .map_err(|error| format!("XGetImage: {error}"))?
@@ -52,17 +71,17 @@ pub fn screenshot(display: &str) -> Result<Screenshot, String> {
             format.bits_per_pixel
         ));
     }
-    let width = usize::from(screen.width_in_pixels);
-    let height = usize::from(screen.height_in_pixels);
+    let width = usize::from(width);
+    let height = usize::from(height);
     let stride = (width * usize::from(format.bits_per_pixel)).div_ceil(32) * 4;
     if reply.data.len() < stride * height {
-        return Err("x11: screenshot reply was shorter than the screen".to_owned());
+        return Err("x11: image reply was shorter than the rectangle".to_owned());
     }
     let mut rgba = vec![0_u8; width * height * 4];
-    for y in 0..height {
-        for x in 0..width {
-            let source = y * stride + x * bytes_per_pixel;
-            let target = (y * width + x) * 4;
+    for row in 0..height {
+        for column in 0..width {
+            let source = row * stride + column * bytes_per_pixel;
+            let target = (row * width + column) * 4;
             rgba[target] = reply.data[source + 2];
             rgba[target + 1] = reply.data[source + 1];
             rgba[target + 2] = reply.data[source];
@@ -90,12 +109,17 @@ pub fn scaled_png(display: &str, max_edge: u32) -> Result<Vec<u8>, String> {
             scale(&shot, width.max(1), height.max(1)),
         )
     };
-    encode_png(width, height, &pixels)
+    encode_png(width, height, &pixels, png::Compression::default())
 }
 
 pub fn raw_png(display: &str) -> Result<Vec<u8>, String> {
     let shot = screenshot(display)?;
-    encode_png(shot.width, shot.height, &shot.rgba)
+    encode_png(
+        shot.width,
+        shot.height,
+        &shot.rgba,
+        png::Compression::default(),
+    )
 }
 
 fn scale(source: &Screenshot, width: u32, height: u32) -> Vec<u8> {
@@ -112,11 +136,17 @@ fn scale(source: &Screenshot, width: u32, height: u32) -> Vec<u8> {
     target
 }
 
-fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+pub fn encode_png(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    compression: png::Compression,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(Cursor::new(&mut bytes), width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(compression);
     let mut writer = encoder
         .write_header()
         .map_err(|error| format!("encode PNG: {error}"))?;

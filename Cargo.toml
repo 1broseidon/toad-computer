@@ -9,7 +9,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
-axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json"] }
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query", "ws"] }
 rmcp = { version = "=3.2.0", features = [
     "client",
     "server",
@@ -19,9 +19,10 @@ rmcp = { version = "=3.2.0", features = [
 ] }
 futures-util = "0.3.34"
 base64 = "0.22.1"
-# The agent is the window manager and the screenshotter, so it talks X11
-# itself: XGetImage, EWMH, and the redirect of every map and configure.
-x11rb = { version = "=0.14.0", default-features = false }
+# The agent is the window manager, the screenshotter, the screen streamer and
+# the person's hands, so it talks X11 itself: XGetImage, EWMH, the redirect of
+# every map and configure, DAMAGE for what changed, XTEST for input.
+x11rb = { version = "=0.14.0", default-features = false, features = ["damage", "xtest"] }
 # Odilia's protocol crate is the typed route to the desktop accessibility tree.
 atspi = { version = "=0.30.0", default-features = false, features = ["proxies", "tokio", "zbus"] }
 # Chromium is visible on the desktop while this drives its DevTools protocol.
@@ -33,3 +34,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# The contract test opens the viewer's WebSocket the way the page does.
+tokio-tungstenite = "0.28"

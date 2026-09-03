@@ -3,9 +3,12 @@ pub mod boot;
 pub mod browser;
 pub mod desktop;
 pub mod lease;
+pub mod screen;
 pub mod serve;
 pub mod tools;
+pub mod viewer;
 pub mod x11;
+pub mod xtest;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +48,8 @@ pub struct App {
     pub config: Arc<Config>,
     pub access: MachineAccess,
     pub browser: BrowserManager,
+    /// The screen stream and the person's hands; `None` until a display is up.
+    pub viewer: Option<Arc<viewer::Viewer>>,
 }
 
 impl App {
@@ -54,6 +59,12 @@ impl App {
             access: MachineAccess::new(),
             browser: BrowserManager::new(Arc::clone(&config)),
             config,
+            viewer: None,
         }
+    }
+
+    pub fn with_viewer(mut self, viewer: viewer::Viewer) -> Self {
+        self.viewer = Some(Arc::new(viewer));
+        self
     }
 }

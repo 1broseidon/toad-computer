@@ -1,4 +1,7 @@
 use std::collections::HashSet;
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
 
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use rmcp::ServiceExt;
@@ -178,6 +181,79 @@ async fn image_honors_the_computer_contract() {
     assert!(text(&blocked).contains("alice"));
     let released = call(&alice, "state", json!({"action":"release"})).await;
     assert!(text(&released).contains("\"released\":true"));
+
+    // The viewer: the page is open, the socket wants the token, the first
+    // frame is the whole screen as PNG, and a person's keystroke lands in
+    // the page and holds the machine against the agent for a moment.
+    let page = reqwest::get(format!("{base}/"))
+        .await
+        .expect("viewer page")
+        .text()
+        .await
+        .expect("viewer html");
+    assert!(page.contains("<canvas"), "the viewer page is served at /");
+    let ws_base = base.replacen("http", "ws", 1);
+    if !token.is_empty() {
+        let refused = tokio_tungstenite::connect_async(format!("{ws_base}/ws")).await;
+        assert!(
+            matches!(
+                refused,
+                Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
+                    if response.status() == 401
+            ),
+            "the socket refuses a missing token"
+        );
+    }
+    let typing = call(
+        &client,
+        "browser",
+        json!({"action":"navigate","url":"data:text/html,<title>Typing</title><textarea id=t autofocus></textarea>"}),
+    )
+    .await;
+    assert!(!typing.is_error.unwrap_or(false), "{}", text(&typing));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("{ws_base}/ws?token={token}"))
+        .await
+        .expect("viewer socket");
+    let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("a frame within five seconds")
+        .expect("a frame")
+        .expect("a frame");
+    let bytes = first.into_data();
+    let header: Vec<u16> = (0..6)
+        .map(|index| u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]))
+        .collect();
+    assert_eq!(
+        &header[..4],
+        &[0, 0, header[4], header[5]],
+        "the first frame is the whole screen"
+    );
+    assert_eq!(&bytes[12..16], b"\x89PNG", "the frame is a PNG");
+    for down in [true, false] {
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                json!({"t":"key","key":"x","down":down}).to_string(),
+            ))
+            .await
+            .expect("send key");
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let typed = call(
+        &client,
+        "browser",
+        json!({"action":"eval","js":"document.getElementById('t').value"}),
+    )
+    .await;
+    assert!(
+        text(&typed).contains('x'),
+        "the keystroke reached the page: {}",
+        text(&typed)
+    );
+    let held = call(&client, "input", json!({"action":"key","combo":"Escape"})).await;
+    assert!(held.is_error.unwrap_or(false), "{}", text(&held));
+    assert!(text(&held).contains("person"), "{}", text(&held));
+    socket.close(None).await.ok();
 
     client.cancel().await.ok();
     alice.cancel().await.ok();

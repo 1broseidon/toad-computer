@@ -33,6 +33,30 @@ of that.
 `xdotool` and `xclip` are still installed; they leave when the agent sends
 input and owns the clipboard itself.
 
+## The viewer
+
+The machine serves its own screen. `/` is a page with one canvas; `/ws` is
+the socket behind it. Frames go down as binary messages, six little-endian
+`u16` (x, y, width, height, screen width, screen height) followed by a PNG of
+that rectangle; X DAMAGE decides which rectangles, at most twenty a second,
+and an idle desktop sends nothing. A viewer that joins or falls behind gets
+the whole screen next. Input comes up as JSON and reaches the X server through
+XTEST:
+
+```json
+{"t":"move","x":640,"y":400}
+{"t":"button","b":1,"down":true}
+{"t":"wheel","dy":1}
+{"t":"key","key":"Enter","down":true}
+```
+
+The socket takes the bearer as a `token` query, because a browser cannot send
+a header on a WebSocket; Toad opens `http://127.0.0.1:<port>/#<token>` and the
+page reads the fragment, which never leaves the browser. A person's input
+holds the machine as `person` for ten seconds at a time, so a teammate's
+mutating tools are refused while someone is driving and the desktop hands
+itself back when they stop.
+
 ## The tools
 
 - `capture` returns a scaled PNG and the AT-SPI tree, or writes an original PNG.
@@ -44,9 +68,10 @@ input and owns the clipboard itself.
 - `wait` polls the accessibility tree and browser page text for a phrase.
 - `state` owns control leases, browser logins, and home-directory snapshots.
 
-`/health` never requires authentication. When `TOAD_COMPUTER_TOKEN` is set,
-every method on `/mcp` requires `Authorization: Bearer <token>` and otherwise
-returns a JSON 401. `X-Computer-Holder` names the teammate using a lease or
+`/health` and the viewer page never require authentication. When
+`TOAD_COMPUTER_TOKEN` is set, every method on `/mcp` requires
+`Authorization: Bearer <token>`, the viewer's socket requires the same token
+as its `token` query, and otherwise both return a JSON 401. `X-Computer-Holder` names the teammate using a lease or
 run slot; an absent header means `anonymous`.
 
 ## The desktop
@@ -70,7 +95,7 @@ the agent outside the container.
 
 | variable | default | |
 | --- | --- | --- |
-| `TOAD_COMPUTER_ADDR` | `0.0.0.0:8787` | where `/mcp` and `/health` listen |
+| `TOAD_COMPUTER_ADDR` | `0.0.0.0:8787` | where `/mcp`, `/health`, and the viewer listen |
 | `TOAD_COMPUTER_TOKEN` | unset | bearer for `/mcp`; unset means open |
 | `TOAD_COMPUTER_HOME` | `/home/agent` | the directory `files` is confined to |
 | `TOAD_COMPUTER_SCREEN` | `1920x1080` | the Xvfb screen `boot` creates |
@@ -104,7 +129,11 @@ sized `/dev/shm`.
 ```
 src/boot.rs      PID 1, Xvfb, dbus, then the agent
 src/desktop.rs   wallpaper, dock, window manager
-src/serve.rs     the HTTP door: /health, bearer auth, /mcp
+src/serve.rs     the HTTP door: /health, bearer auth, /mcp, the viewer routes
+src/viewer.rs    the viewer page and its socket
+src/viewer.html  the page: one canvas, pointer and keys
+src/screen.rs    DAMAGE-driven PNG rectangles for the viewer
+src/xtest.rs     the person's pointer and keys, injected with XTEST
 src/tools/       the eight tools
 src/browser.rs   the managed Chromium over CDP
 src/x11.rs       screenshots and EWMH window queries

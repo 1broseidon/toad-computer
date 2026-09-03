@@ -135,6 +135,15 @@ impl MachineAccess {
         Ok((seconds, SystemTime::now() + Duration::from_secs(seconds)))
     }
 
+    /// The person at the screen outranks every lease: their hands on the
+    /// desktop hold it for `seconds` from now, whoever held it before.
+    pub async fn seize(&self, holder: &str, seconds: u64) {
+        *self.lease.lock().await = Some(ControlLease {
+            holder: holder.to_owned(),
+            expires: Instant::now() + Duration::from_secs(seconds),
+        });
+    }
+
     pub async fn release(&self, holder: &str) -> Result<bool, String> {
         let mut active = self.lease.lock().await;
         let Some(lease) = active.as_ref() else {

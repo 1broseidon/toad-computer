@@ -18,7 +18,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use serde_json::{Value, json};
 
-use crate::{App, tools};
+use crate::{App, tools, viewer};
 
 const MAX_REQUEST_BODY: usize = 50 * 1024 * 1024 * 4 / 3 + 1024 * 1024;
 
@@ -72,9 +72,14 @@ pub async fn run(app: App) -> Result<(), String> {
         .map_err(|error| format!("create {}: {error}", app.config.home.display()))?;
     let address = app.config.addr.clone();
     let expected_token = app.config.token.clone();
+    let tools_app = app.clone();
     let service: StreamableHttpService<ComputerTools, LocalSessionManager> =
         StreamableHttpService::new(
-            move || Ok(ComputerTools { app: app.clone() }),
+            move || {
+                Ok(ComputerTools {
+                    app: tools_app.clone(),
+                })
+            },
             Arc::new(LocalSessionManager::default()),
             StreamableHttpServerConfig::default()
                 .disable_allowed_hosts()
@@ -82,13 +87,16 @@ pub async fn run(app: App) -> Result<(), String> {
         );
     let router = Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/", get(viewer::page))
+        .route("/ws", get(viewer::socket))
         .nest_service("/mcp", service)
         .layer(axum::middleware::from_fn(
             move |request: Request, next: Next| {
                 let expected_token = expected_token.clone();
                 async move { authenticate(request, next, expected_token.as_deref()).await }
             },
-        ));
+        ))
+        .with_state(app);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .map_err(|error| format!("bind {address}: {error}"))?;
@@ -99,8 +107,10 @@ pub async fn run(app: App) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// `/health` is open; the viewer page is open and its socket checks the
+/// token itself, because a browser cannot send a bearer header on either.
 async fn authenticate(request: Request, next: Next, token: Option<&str>) -> Response {
-    if request.uri().path() == "/health" || token.is_none() {
+    if matches!(request.uri().path(), "/health" | "/" | "/ws") || token.is_none() {
         return next.run(request).await;
     }
     let expected = format!("Bearer {}", token.expect("checked above"));
@@ -120,7 +130,7 @@ async fn authenticate(request: Request, next: Next, token: Option<&str>) -> Resp
     }
 }
 
-fn same_secret(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn same_secret(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toad Computer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font: 13px system-ui, sans-serif; color: #9a9a9a; }
+  canvas { display: block; outline: none; cursor: default; image-rendering: auto; }
+  #status { position: fixed; top: 10px; left: 10px; padding: 4px 9px; border-radius: 999px; background: rgba(22,22,22,.92); border: 1px solid #2c2c2c; pointer-events: none; transition: opacity .3s; }
+  #status.quiet { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="screen" tabindex="0" width="1" height="1"></canvas>
+<div id="status">Connecting…</div>
+<script>
+(() => {
+  const canvas = document.getElementById("screen");
+  const status = document.getElementById("status");
+  const context = canvas.getContext("2d");
+  const token = decodeURIComponent(location.hash.slice(1));
+  let socket = null;
+  let drawing = Promise.resolve();
+  let quiet = null;
+
+  function say(text, fade) {
+    status.textContent = text;
+    status.classList.remove("quiet");
+    clearTimeout(quiet);
+    if (fade) quiet = setTimeout(() => status.classList.add("quiet"), 1200);
+  }
+
+  function fit() {
+    const scale = Math.min(innerWidth / canvas.width, innerHeight / canvas.height);
+    canvas.style.width = Math.floor(canvas.width * scale) + "px";
+    canvas.style.height = Math.floor(canvas.height * scale) + "px";
+  }
+  addEventListener("resize", fit);
+
+  function connect() {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    socket = new WebSocket(`${scheme}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => say("Connected", true);
+    socket.onclose = () => { say("Reconnecting…"); setTimeout(connect, 1000); };
+    socket.onmessage = (event) => {
+      const data = event.data;
+      const view = new DataView(data);
+      const [x, y, w, h, sw, sh] = [0, 2, 4, 6, 8, 10].map((offset) => view.getUint16(offset, true));
+      if (canvas.width !== sw || canvas.height !== sh) { canvas.width = sw; canvas.height = sh; fit(); }
+      const blob = new Blob([data.slice(12)], { type: "image/png" });
+      drawing = drawing
+        .then(() => createImageBitmap(blob))
+        .then((bitmap) => { context.drawImage(bitmap, x, y); bitmap.close(); })
+        .catch(() => {});
+    };
+  }
+
+  function send(message) {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  }
+
+  function at(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(canvas.width - 1, Math.round((event.clientX - rect.left) * canvas.width / rect.width))),
+      y: Math.max(0, Math.min(canvas.height - 1, Math.round((event.clientY - rect.top) * canvas.height / rect.height))),
+    };
+  }
+
+  // One pointer position per animation frame is plenty for a human hand.
+  let pending = null;
+  canvas.addEventListener("pointermove", (event) => {
+    pending = at(event);
+    requestAnimationFrame(() => { if (pending) { send({ t: "move", ...pending }); pending = null; } });
+  });
+  const buttons = { 0: 1, 1: 2, 2: 3 };
+  canvas.addEventListener("pointerdown", (event) => {
+    canvas.focus();
+    send({ t: "move", ...at(event) });
+    if (event.button in buttons) send({ t: "button", b: buttons[event.button], down: true });
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    if (event.button in buttons) send({ t: "button", b: buttons[event.button], down: false });
+  });
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+  // Wheel deltas arrive in pixels from a trackpad and in lines from a mouse;
+  // either way one notch is sent per fifty pixels' worth.
+  let wheelX = 0, wheelY = 0;
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const unit = event.deltaMode === 1 ? 50 : 1;
+    wheelX += event.deltaX * unit; wheelY += event.deltaY * unit;
+    while (Math.abs(wheelY) >= 50) { send({ t: "wheel", dy: Math.sign(wheelY) }); wheelY -= Math.sign(wheelY) * 50; }
+    while (Math.abs(wheelX) >= 50) { send({ t: "wheel", dx: Math.sign(wheelX) }); wheelX -= Math.sign(wheelX) * 50; }
+  }, { passive: false });
+
+  // The X server repeats a held key itself, so browser repeats are dropped.
+  canvas.addEventListener("keydown", (event) => {
+    event.preventDefault();
+    if (!event.repeat) send({ t: "key", key: event.key, down: true });
+  });
+  canvas.addEventListener("keyup", (event) => {
+    event.preventDefault();
+    send({ t: "key", key: event.key, down: false });
+  });
+  canvas.addEventListener("blur", () => say("Click the screen to type", true));
+
+  canvas.focus();
+  connect();
+})();
+</script>
+</body>
+</html>
