@@ -15,7 +15,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::{App, Config, desktop, serve, viewer};
+use crate::display::Display;
+use crate::{App, Config, desktop, serve};
 
 const RUNTIME_DIR: &str = "/tmp/toad-computer";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -138,7 +139,7 @@ fn machine(config: Config, width: u16, height: u16) -> Result<(), String> {
     )?;
     wait_for(&bus_path, "the session bus", &mut dbus)?;
 
-    let app = App::new(config.clone()).with_viewer(viewer::start(&config.display)?);
+    let app = App::new(config.clone()).with_display(Display::open(&config.display)?);
     let (requests, mut incoming) = tokio::sync::mpsc::unbounded_channel();
     let (ready, desktop_ready) = mpsc::channel();
     let display = config.display.clone();

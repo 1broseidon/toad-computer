@@ -8,7 +8,7 @@
 //! are refused while someone is driving, and nobody has to remember to give
 //! the desktop back.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -20,27 +20,14 @@ use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::App;
-use crate::screen::Screen;
+use crate::display::Display;
 use crate::serve::same_secret;
-use crate::xtest::Hands;
 
 const PAGE: &str = include_str!("viewer.html");
 /// The holder name a person's input takes the machine under.
 pub const PERSON: &str = "person";
 /// Seconds the machine stays the person's after their last input.
 const HOLD: u64 = 10;
-
-pub struct Viewer {
-    pub screen: Screen,
-    hands: Mutex<Hands>,
-}
-
-pub fn start(display: &str) -> Result<Viewer, String> {
-    Ok(Viewer {
-        screen: Screen::start(display)?,
-        hands: Mutex::new(Hands::new(display)?),
-    })
-}
 
 pub async fn page() -> Html<&'static str> {
     Html(PAGE)
@@ -66,18 +53,18 @@ pub async fn socket(
         )
             .into_response();
     }
-    let Some(viewer) = app.viewer.clone() else {
+    let Some(display) = app.display.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "this computer has no display",
         )
             .into_response();
     };
-    upgrade.on_upgrade(move |ws| drive(ws, app, viewer))
+    upgrade.on_upgrade(move |ws| drive(ws, app, display))
 }
 
-async fn drive(mut ws: WebSocket, app: App, viewer: Arc<Viewer>) {
-    let mut frames = viewer.screen.subscribe();
+async fn drive(mut ws: WebSocket, app: App, display: Arc<Display>) {
+    let mut frames = display.screen.subscribe();
     loop {
         tokio::select! {
             frame = frames.recv() => match frame {
@@ -86,12 +73,12 @@ async fn drive(mut ws: WebSocket, app: App, viewer: Arc<Viewer>) {
                         break;
                     }
                 }
-                Err(RecvError::Lagged(_)) => viewer.screen.request_full(),
+                Err(RecvError::Lagged(_)) => display.screen.request_full(),
                 Err(RecvError::Closed) => break,
             },
             message = ws.recv() => match message {
                 Some(Ok(Message::Text(text))) => {
-                    if let Err(error) = handle(&text, &viewer, &app).await {
+                    if let Err(error) = handle(&text, &display, &app).await {
                         eprintln!("toad-computer: viewer: {error}");
                     }
                 }
@@ -127,10 +114,10 @@ enum Input {
     },
 }
 
-async fn handle(text: &str, viewer: &Viewer, app: &App) -> Result<(), String> {
+async fn handle(text: &str, display: &Display, app: &App) -> Result<(), String> {
     let input: Input = serde_json::from_str(text).map_err(|error| format!("input: {error}"))?;
     app.access.seize(PERSON, HOLD).await;
-    let mut hands = viewer
+    let mut hands = display
         .hands
         .lock()
         .map_err(|_| "the hands are poisoned".to_owned())?;

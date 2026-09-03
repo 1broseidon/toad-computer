@@ -6,7 +6,7 @@
 //! work area above the dock; a dialog opens centered at its own size. Focus
 //! follows a click, so a person driving the screen reaches the window they
 //! see. `_NET_CLIENT_LIST`, `_NET_ACTIVE_WINDOW` and `_NET_WM_STATE` are kept
-//! current because the `windows` tool and xdotool read them.
+//! current because the `windows` tool reads them.
 
 use std::collections::HashMap;
 use std::io::Cursor;

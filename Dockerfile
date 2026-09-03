@@ -47,8 +47,8 @@ FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc
 
 # What Xvfb links, then the desktop. Chromium's package still names Mesa as
 # a dependency for libgbm, whose backends load on demand, so the rasterizer
-# files are deleted after install. xdotool and xclip leave when the agent
-# sends input and owns the clipboard itself.
+# files are deleted after install. Input is XTEST and the clipboard is a
+# selection the agent owns, so no input or clipboard program is installed.
 RUN apk add --no-cache \
         libxfont2 libxcvt libxau libmd pixman xkbcomp xkeyboard-config \
         dbus \
@@ -56,8 +56,6 @@ RUN apk add --no-cache \
         chromium \
         ttf-dejavu \
         font-noto-emoji \
-        xdotool \
-        xclip \
     && rm -rf /usr/lib/libLLVM* /usr/lib/libgallium* /usr/lib/gallium-pipe /usr/lib/libGL.so* \
     && adduser -D -u 1000 -h /home/agent agent \
     && install -d -m 1777 /tmp/.X11-unix

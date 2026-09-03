@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{App, x11};
 
-use super::{ToolResult, action_error, command, json_text, text};
+use super::{ToolResult, action_error, json_text, text};
 
 #[derive(Deserialize)]
 struct Input {
@@ -21,8 +21,14 @@ pub async fn call(app: &App, arguments: Value, holder: &str) -> ToolResult {
     }
     let _guard = app.access.mutate(holder).await?;
     match input.action.as_str() {
-        "focus" => run(app, &["windowactivate", "--sync", required_id(&input)?]).await,
-        "close" => run(app, &["windowclose", required_id(&input)?]).await,
+        "focus" => {
+            x11::activate(&app.config.display, required_id(&input)?)?;
+            Ok(text("ok"))
+        }
+        "close" => {
+            x11::close(&app.config.display, required_id(&input)?)?;
+            Ok(text("ok"))
+        }
         "maximize" => {
             let id = required_id(&input)?;
             x11::maximize(&app.config.display, id, !input.unmaximize)?;
@@ -41,12 +47,6 @@ fn required_id(input: &Input) -> Result<&str, String> {
     (!input.window_id.is_empty())
         .then_some(input.window_id.as_str())
         .ok_or_else(|| "window_id is required".to_owned())
-}
-
-async fn run(app: &App, arguments: &[&str]) -> ToolResult {
-    let arguments: Vec<String> = arguments.iter().map(ToString::to_string).collect();
-    command(&app.config.display, "xdotool", &arguments).await?;
-    Ok(text("ok"))
 }
 
 async fn tile(app: &App) -> ToolResult {
@@ -81,21 +81,14 @@ async fn tile(app: &App) -> ToolResult {
             geometry
         };
         x11::maximize(&app.config.display, &window.id, false)?;
-        run(
-            app,
-            &["windowmove", &window.id, &x.to_string(), &y.to_string()],
-        )
-        .await?;
-        run(
-            app,
-            &[
-                "windowsize",
-                &window.id,
-                &width.to_string(),
-                &height.to_string(),
-            ],
-        )
-        .await?;
+        x11::place(
+            &app.config.display,
+            &window.id,
+            x,
+            y,
+            width as u32,
+            height as u32,
+        )?;
     }
     Ok(text(format!("tiled {} windows", windows.len())))
 }

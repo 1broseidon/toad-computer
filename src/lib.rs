@@ -1,7 +1,9 @@
 pub mod a11y;
 pub mod boot;
 pub mod browser;
+pub mod clipboard;
 pub mod desktop;
+pub mod display;
 pub mod lease;
 pub mod screen;
 pub mod serve;
@@ -48,8 +50,8 @@ pub struct App {
     pub config: Arc<Config>,
     pub access: MachineAccess,
     pub browser: BrowserManager,
-    /// The screen stream and the person's hands; `None` until a display is up.
-    pub viewer: Option<Arc<viewer::Viewer>>,
+    /// The screen stream, the hands, and the clipboard; `None` until a display is up.
+    pub display: Option<Arc<display::Display>>,
 }
 
 impl App {
@@ -59,12 +61,19 @@ impl App {
             access: MachineAccess::new(),
             browser: BrowserManager::new(Arc::clone(&config)),
             config,
-            viewer: None,
+            display: None,
         }
     }
 
-    pub fn with_viewer(mut self, viewer: viewer::Viewer) -> Self {
-        self.viewer = Some(Arc::new(viewer));
+    pub fn with_display(mut self, display: display::Display) -> Self {
+        self.display = Some(Arc::new(display));
         self
+    }
+
+    /// The display, or the sentence a tool gives when there is none.
+    pub fn display(&self) -> Result<Arc<display::Display>, String> {
+        self.display
+            .clone()
+            .ok_or_else(|| "this computer has no display".to_owned())
     }
 }

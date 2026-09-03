@@ -140,19 +140,3 @@ pub fn json_text(value: impl serde::Serialize) -> ToolResult {
 pub fn action_error(tool: &str, action: &str, actions: &[&str]) -> String {
     format!("{tool}: unknown action {action:?} (one of: {actions:?})")
 }
-
-pub async fn command(display: &str, program: &str, arguments: &[String]) -> Result<String, String> {
-    let output = tokio::process::Command::new(program)
-        .args(arguments)
-        .env("DISPLAY", display)
-        .output()
-        .await
-        .map_err(|error| format!("{program}: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{program}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}

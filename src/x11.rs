@@ -3,9 +3,10 @@ use std::io::Cursor;
 use serde::Serialize;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask, ImageFormat,
-    MapState, Screen, Window as XWindow,
+    AtomEnum, ClientMessageData, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask,
+    ImageFormat, MapState, Screen, Window as XWindow,
 };
+use x11rb::rust_connection::RustConnection;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Window {
@@ -229,21 +230,94 @@ pub fn windows(display: &str) -> Result<Vec<Window>, String> {
     Ok(result)
 }
 
+/// Ask the window manager, which is this agent's desktop thread, to
+/// maximize or restore a window.
 pub fn maximize(display: &str, window: &str, enabled: bool) -> Result<(), String> {
-    let window = u32::from_str_radix(window.trim_start_matches("0x"), 16)
-        .map_err(|_| "window_id must be an X11 window id".to_owned())?;
-    let (connection, screen_number) =
-        x11rb::connect(Some(display)).map_err(|error| format!("x11 connect: {error}"))?;
-    let root = connection.setup().roots[screen_number].root;
+    let (connection, root) = connect(display)?;
     let state = atom(&connection, b"_NET_WM_STATE")?;
     let vertical = atom(&connection, b"_NET_WM_STATE_MAXIMIZED_VERT")?;
     let horizontal = atom(&connection, b"_NET_WM_STATE_MAXIMIZED_HORZ")?;
-    let event = ClientMessageEvent::new(
-        32,
-        window,
+    ask_manager(
+        &connection,
+        root,
+        window_id(window)?,
         state,
-        ClientMessageData::from([u32::from(enabled), vertical, horizontal, 1, 0]),
-    );
+        [u32::from(enabled), vertical, horizontal, 1, 0],
+    )
+}
+
+/// Ask the window manager to focus and raise a window.
+pub fn activate(display: &str, window: &str) -> Result<(), String> {
+    let (connection, root) = connect(display)?;
+    let active = atom(&connection, b"_NET_ACTIVE_WINDOW")?;
+    ask_manager(
+        &connection,
+        root,
+        window_id(window)?,
+        active,
+        [2, 0, 0, 0, 0],
+    )
+}
+
+/// Ask the window manager to close a window the polite way first.
+pub fn close(display: &str, window: &str) -> Result<(), String> {
+    let (connection, root) = connect(display)?;
+    let close = atom(&connection, b"_NET_CLOSE_WINDOW")?;
+    ask_manager(
+        &connection,
+        root,
+        window_id(window)?,
+        close,
+        [0, 2, 0, 0, 0],
+    )
+}
+
+/// Move and size a window. The request is redirected to the window
+/// manager, which honours it for a window that is not maximized.
+pub fn place(
+    display: &str,
+    window: &str,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let (connection, _) = connect(display)?;
+    connection
+        .configure_window(
+            window_id(window)?,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(width.max(1))
+                .height(height.max(1)),
+        )
+        .map_err(|error| error.to_string())?;
+    connection.flush().map_err(|error| error.to_string())
+}
+
+fn connect(display: &str) -> Result<(RustConnection, XWindow), String> {
+    let (connection, screen_number) =
+        x11rb::connect(Some(display)).map_err(|error| format!("x11 connect: {error}"))?;
+    let root = connection.setup().roots[screen_number].root;
+    Ok((connection, root))
+}
+
+fn window_id(window: &str) -> Result<XWindow, String> {
+    u32::from_str_radix(window.trim_start_matches("0x"), 16)
+        .map_err(|_| "window_id must be an X11 window id".to_owned())
+}
+
+/// An EWMH client message on the root, which the desktop thread receives
+/// because it selected substructure redirection there.
+fn ask_manager(
+    connection: &RustConnection,
+    root: XWindow,
+    window: XWindow,
+    kind: u32,
+    data: [u32; 5],
+) -> Result<(), String> {
+    let event = ClientMessageEvent::new(32, window, kind, ClientMessageData::from(data));
     connection
         .send_event(
             false,

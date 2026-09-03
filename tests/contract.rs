@@ -212,6 +212,102 @@ async fn image_honors_the_computer_contract() {
     .await;
     assert!(!typing.is_error.unwrap_or(false), "{}", text(&typing));
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // The agent types through XTEST: lower case, shifted letters, symbols on
+    // shifted keys, and a character with no key of its own.
+    let typed = call(
+        &client,
+        "input",
+        json!({"action":"type","text":"Hi! a_b@c é"}),
+    )
+    .await;
+    assert!(!typed.is_error.unwrap_or(false), "{}", text(&typed));
+    let value = call(
+        &client,
+        "browser",
+        json!({"action":"eval","js":"document.getElementById('t').value"}),
+    )
+    .await;
+    assert!(
+        text(&value).contains("Hi! a_b@c é"),
+        "the agent's typing reached the page: {}",
+        text(&value)
+    );
+    // A chord: select all, then a clipboard copy Chromium serves.
+    let all = call(&client, "input", json!({"action":"key","combo":"ctrl+a"})).await;
+    assert!(!all.is_error.unwrap_or(false), "{}", text(&all));
+    let copy = call(&client, "input", json!({"action":"key","combo":"ctrl+c"})).await;
+    assert!(!copy.is_error.unwrap_or(false), "{}", text(&copy));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let read = call(&client, "input", json!({"action":"clipboard_read"})).await;
+    assert!(
+        text(&read).contains("Hi! a_b@c é"),
+        "the agent reads what Chromium put on the clipboard: {}",
+        text(&read)
+    );
+    // The other way: the agent owns the clipboard and Chromium pastes from it.
+    let pasted = call(
+        &client,
+        "input",
+        json!({"action":"paste","text":"pasted from the agent ✓"}),
+    )
+    .await;
+    assert!(!pasted.is_error.unwrap_or(false), "{}", text(&pasted));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let value = call(
+        &client,
+        "browser",
+        json!({"action":"eval","js":"document.getElementById('t').value"}),
+    )
+    .await;
+    assert!(
+        text(&value).contains("pasted from the agent ✓"),
+        "Chromium pasted what the agent owns: {}",
+        text(&value)
+    );
+    let written = call(
+        &client,
+        "input",
+        json!({"action":"clipboard_write","text":"round trip"}),
+    )
+    .await;
+    assert!(!written.is_error.unwrap_or(false), "{}", text(&written));
+    let read = call(&client, "input", json!({"action":"clipboard_read"})).await;
+    assert_eq!(text(&read), "round trip");
+
+    // Window placement goes through the window manager: tile restores the
+    // window from maximized and puts it where asked; focus is honoured.
+    let windows = call(&client, "windows", json!({"action":"list"})).await;
+    let window_list: Vec<serde_json::Value> =
+        serde_json::from_str(&text(&windows)).expect("window JSON");
+    let browser_window = window_list[0]["id"].as_str().expect("window id").to_owned();
+    let tiled = call(&client, "windows", json!({"action":"tile"})).await;
+    assert!(!tiled.is_error.unwrap_or(false), "{}", text(&tiled));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let windows = call(&client, "windows", json!({"action":"list"})).await;
+    let window_list: Vec<serde_json::Value> =
+        serde_json::from_str(&text(&windows)).expect("window JSON");
+    let width = window_list[0]["bounds"][2].as_i64().expect("width");
+    assert!(
+        (900..=1000).contains(&width),
+        "the window is the left half of a 1920 screen: {windows:?}"
+    );
+    let focused = call(
+        &client,
+        "windows",
+        json!({"action":"focus","window_id":browser_window}),
+    )
+    .await;
+    assert!(!focused.is_error.unwrap_or(false), "{}", text(&focused));
+    let maximized = call(
+        &client,
+        "windows",
+        json!({"action":"maximize","window_id":browser_window}),
+    )
+    .await;
+    assert!(!maximized.is_error.unwrap_or(false), "{}", text(&maximized));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
     let (mut socket, _) = tokio_tungstenite::connect_async(format!("{ws_base}/ws?token={token}"))
         .await
         .expect("viewer socket");

@@ -5,10 +5,13 @@
 //! a keycode. Keysyms bridge the two: the name becomes a keysym, the keyboard
 //! mapping says which keycode carries it, and a keysym no keycode carries is
 //! given a spare keycode for the life of the session, the way xdotool does.
-//! Modifiers arrive as their own key events, so pressing the keycode that
-//! carries `a` while Shift is down is how `A` is typed.
+//! A person's modifiers arrive as their own key events, so pressing the
+//! keycode that carries `a` while Shift is down is how they type `A`. The
+//! agent types text instead, so for it the keyboard mapping also says whether
+//! the keysym sits in a shifted column, and Shift is held around the press.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
@@ -17,6 +20,15 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
+
+const SHIFT: Keysym = 0xffe1;
+const CONTROL: Keysym = 0xffe3;
+const ALT: Keysym = 0xffe9;
+const SUPER: Keysym = 0xffeb;
+/// Between a press and its release, and between typed characters, so a
+/// client that reads its queue in order still sees two events.
+const KEY_GAP: Duration = Duration::from_millis(2);
+const CLICK_GAP: Duration = Duration::from_millis(60);
 
 pub struct Hands {
     connection: RustConnection,
@@ -86,6 +98,88 @@ impl Hands {
         self.fake(kind, keycode, 0, 0)
     }
 
+    /// `count` clicks of `button` where the pointer is.
+    pub fn click(&self, button: u8, count: u32) -> Result<(), String> {
+        for index in 0..count {
+            if index > 0 {
+                std::thread::sleep(CLICK_GAP);
+            }
+            self.button(button, true)?;
+            std::thread::sleep(KEY_GAP);
+            self.button(button, false)?;
+        }
+        Ok(())
+    }
+
+    /// Text as a person would type it, one character at a time, Shift held
+    /// for the characters that need it. A newline is Return and a tab is Tab.
+    pub fn type_text(&mut self, text: &str) -> Result<(), String> {
+        for character in text.chars() {
+            let keysym = match character {
+                '\n' => 0xff0d,
+                '\t' => 0xff09,
+                other => match keysym_for(&other.to_string()) {
+                    Some(keysym) => keysym,
+                    None => continue,
+                },
+            };
+            let (keycode, shifted) = self.key_for(keysym)?;
+            let shift = if shifted {
+                Some(self.keycode_for(SHIFT)?)
+            } else {
+                None
+            };
+            if let Some(shift) = shift {
+                self.fake(KEY_PRESS_EVENT, shift, 0, 0)?;
+            }
+            self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
+            std::thread::sleep(KEY_GAP);
+            self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
+            if let Some(shift) = shift {
+                self.fake(KEY_RELEASE_EVENT, shift, 0, 0)?;
+            }
+            std::thread::sleep(KEY_GAP);
+        }
+        Ok(())
+    }
+
+    /// A chord such as `ctrl+shift+t` or `Return`: modifiers down, the key
+    /// pressed and released, modifiers up in reverse.
+    pub fn combo(&mut self, combo: &str) -> Result<(), String> {
+        let mut parts: Vec<&str> = combo.split('+').map(str::trim).collect();
+        let key = parts
+            .pop()
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| "combo is required".to_owned())?;
+        let mut modifiers = Vec::new();
+        for part in parts {
+            let keysym = match part.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => CONTROL,
+                "shift" => SHIFT,
+                "alt" | "option" => ALT,
+                "super" | "meta" | "cmd" | "command" | "win" => SUPER,
+                other => return Err(format!("unknown modifier {other:?}")),
+            };
+            modifiers.push(self.keycode_for(keysym)?);
+        }
+        let keysym = keysym_named(key).ok_or_else(|| format!("unknown key {key:?}"))?;
+        let (keycode, shifted) = self.key_for(keysym)?;
+        let shift = self.keycode_for(SHIFT)?;
+        if shifted && !modifiers.contains(&shift) {
+            modifiers.push(shift);
+        }
+        for modifier in &modifiers {
+            self.fake(KEY_PRESS_EVENT, *modifier, 0, 0)?;
+        }
+        self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
+        std::thread::sleep(KEY_GAP);
+        self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
+        for modifier in modifiers.iter().rev() {
+            self.fake(KEY_RELEASE_EVENT, *modifier, 0, 0)?;
+        }
+        Ok(())
+    }
+
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<(), String> {
         self.connection
             .xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, self.root, x, y, 0)
@@ -93,9 +187,26 @@ impl Hands {
         self.connection.flush().map_err(|error| error.to_string())
     }
 
+    /// Any keycode that carries the keysym in some column.
     fn keycode_for(&mut self, keysym: Keysym) -> Result<Keycode, String> {
+        self.key_for(keysym).map(|(keycode, _)| keycode)
+    }
+
+    /// The keycode that carries the keysym, and whether it sits in the
+    /// shifted column. The first column wins; the second needs Shift.
+    fn key_for(&mut self, keysym: Keysym) -> Result<(Keycode, bool), String> {
         if let Some(keycode) = self.remapped.get(&keysym) {
-            return Ok(*keycode);
+            return Ok((*keycode, false));
+        }
+        for column in [0, 1] {
+            let found = self
+                .keysyms
+                .chunks(self.per_keycode)
+                .position(|columns| columns.get(column) == Some(&keysym))
+                .map(|index| self.min_keycode + index as u8);
+            if let Some(keycode) = found {
+                return Ok((keycode, column == 1));
+            }
         }
         let found = self
             .keysyms
@@ -103,7 +214,7 @@ impl Hands {
             .position(|columns| columns.contains(&keysym))
             .map(|index| self.min_keycode + index as u8);
         if let Some(keycode) = found {
-            return Ok(keycode);
+            return Ok((keycode, false));
         }
         let keycode = self
             .spare
@@ -118,8 +229,44 @@ impl Hands {
         let start = usize::from(keycode - self.min_keycode) * self.per_keycode;
         self.keysyms[start..start + self.per_keycode].copy_from_slice(&columns);
         self.remapped.insert(keysym, keycode);
-        Ok(keycode)
+        Ok((keycode, false))
     }
+}
+
+/// The keysym for a key named the X way (`Return`, `Page_Up`, `space`), the
+/// browser way (`Enter`, `PageUp`), or as one character.
+pub fn keysym_named(name: &str) -> Option<Keysym> {
+    let x_name = match name {
+        "Return" | "KP_Enter" => Some(0xff0d),
+        "BackSpace" => Some(0xff08),
+        "space" => Some(0x20),
+        "Up" => Some(0xff52),
+        "Down" => Some(0xff54),
+        "Left" => Some(0xff51),
+        "Right" => Some(0xff53),
+        "Page_Up" | "Prior" => Some(0xff55),
+        "Page_Down" | "Next" => Some(0xff56),
+        "Menu" => Some(0xff67),
+        "Print" => Some(0xff61),
+        "Super_L" | "Super" => Some(SUPER),
+        "Shift_L" => Some(SHIFT),
+        "Control_L" => Some(CONTROL),
+        "Alt_L" => Some(ALT),
+        "minus" => Some(0x2d),
+        "plus" => Some(0x2b),
+        "equal" => Some(0x3d),
+        "comma" => Some(0x2c),
+        "period" => Some(0x2e),
+        "slash" => Some(0x2f),
+        "backslash" => Some(0x5c),
+        "semicolon" => Some(0x3b),
+        "apostrophe" => Some(0x27),
+        "grave" => Some(0x60),
+        "bracketleft" => Some(0x5b),
+        "bracketright" => Some(0x5d),
+        _ => None,
+    };
+    x_name.or_else(|| keysym_for(name))
 }
 
 /// The X keysym for a browser `KeyboardEvent.key`. A single character is
@@ -185,6 +332,15 @@ mod tests {
         assert_eq!(keysym_for(" "), Some(0x20));
         assert_eq!(keysym_for("é"), Some(0xe9));
         assert_eq!(keysym_for("€"), Some(0x0100_20ac));
+    }
+
+    #[test]
+    fn x_names_and_browser_names_both_resolve() {
+        assert_eq!(keysym_named("Return"), keysym_named("Enter"));
+        assert_eq!(keysym_named("Page_Up"), keysym_named("PageUp"));
+        assert_eq!(keysym_named("space"), Some(0x20));
+        assert_eq!(keysym_named("l"), Some(0x6c));
+        assert_eq!(keysym_named("Bogus"), None);
     }
 
     #[test]

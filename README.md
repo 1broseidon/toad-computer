@@ -30,8 +30,9 @@ of that.
 | `ttf-dejavu`, `font-noto-emoji` | text and emoji render |
 | `libxfont2`, `libxcvt`, `libxau`, `libmd`, `pixman`, `xkbcomp`, `xkeyboard-config` | what Xvfb links and the keymap it compiles |
 
-`xdotool` and `xclip` are still installed; they leave when the agent sends
-input and owns the clipboard itself.
+Nothing else: the agent sends input through XTEST and owns the CLIPBOARD
+selection itself, so there is no `xdotool`, `xclip`, or `wmctrl` to shell
+out to.
 
 ## The viewer
 
@@ -81,7 +82,9 @@ work area above the dock; a dialog opens centred at its own size; a click
 focuses the window under it. The wallpaper is black with the Toad mark in
 grey, and the dock at the bottom holds the browser. `_NET_CLIENT_LIST`,
 `_NET_ACTIVE_WINDOW`, and `_NET_WM_STATE` are kept current because the
-`windows` tool and xdotool read them.
+`windows` tool reads them, and its `focus`, `close`, and `tile` actions are
+`_NET_ACTIVE_WINDOW`, `_NET_CLOSE_WINDOW`, and configure requests the same
+thread handles.
 
 ## Boot
 

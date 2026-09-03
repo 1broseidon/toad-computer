@@ -1,13 +1,17 @@
-use std::process::Stdio;
+//! Pointer, keyboard, and clipboard, all from inside the process: XTEST for
+//! the hands, the clipboard thread for text. Nothing here spawns a program.
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 
+use crate::display::Display;
+use crate::xtest::Hands;
 use crate::{App, a11y, x11};
 
-use super::{ToolResult, action_error, command, json_text, text};
+use super::{ToolResult, action_error, json_text, text};
 
 #[derive(Deserialize)]
 struct Input {
@@ -38,12 +42,8 @@ struct Input {
 pub async fn call(app: &App, arguments: Value, holder: &str) -> ToolResult {
     let input: Input = serde_json::from_value(arguments).map_err(|error| error.to_string())?;
     if input.action == "clipboard_read" {
-        let value = command(
-            &app.config.display,
-            "xclip",
-            &["-selection".into(), "clipboard".into(), "-o".into()],
-        )
-        .await?;
+        let display = app.display()?;
+        let value = blocking(move || display.clipboard.read()).await?;
         return Ok(text(value));
     }
     if input.action == "batch" {
@@ -62,12 +62,39 @@ pub async fn call(app: &App, arguments: Value, holder: &str) -> ToolResult {
     .map(text)
 }
 
+/// X round trips and the pauses between keystrokes happen off the runtime.
+async fn blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("input task: {error}"))?
+}
+
+async fn with_hands<T, F>(app: &App, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Hands) -> Result<T, String> + Send + 'static,
+{
+    let display: Arc<Display> = app.display()?;
+    blocking(move || {
+        let mut hands = display
+            .hands
+            .lock()
+            .map_err(|_| "the hands are poisoned".to_owned())?;
+        work(&mut hands)
+    })
+    .await
+}
+
 async fn one(app: &App, action: &str, step: &Value) -> Result<String, String> {
     let integer = |name: &str| {
         step.get(name)
             .and_then(Value::as_i64)
             .unwrap_or_default()
-            .to_string()
+            .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
     };
     let string = |name: &str| {
         step.get(name)
@@ -75,124 +102,107 @@ async fn one(app: &App, action: &str, step: &Value) -> Result<String, String> {
             .unwrap_or_default()
             .to_owned()
     };
+    let (x, y, x2, y2) = (integer("x"), integer("y"), integer("x2"), integer("y2"));
     match action {
-        "click" => xdo(
-            app,
-            &[
-                "mousemove",
-                "--sync",
-                &integer("x"),
-                &integer("y"),
-                "click",
-                "1",
-            ],
-        )
-        .await
-        .map(|_| "clicked".into()),
-        "double_click" | "dclick" => xdo(
-            app,
-            &[
-                "mousemove",
-                "--sync",
-                &integer("x"),
-                &integer("y"),
-                "click",
-                "--repeat",
-                "2",
-                "--delay",
-                "50",
-                "1",
-            ],
-        )
-        .await
-        .map(|_| "double-clicked".into()),
-        "right_click" | "rclick" => xdo(
-            app,
-            &[
-                "mousemove",
-                "--sync",
-                &integer("x"),
-                &integer("y"),
-                "click",
-                "3",
-            ],
-        )
-        .await
-        .map(|_| "right-clicked".into()),
-        "move" => xdo(app, &["mousemove", "--sync", &integer("x"), &integer("y")])
+        "click" => {
+            with_hands(app, move |hands| {
+                hands.move_to(x, y)?;
+                hands.click(1, 1)?;
+                Ok("clicked".into())
+            })
             .await
-            .map(|_| "moved".into()),
+        }
+        "double_click" | "dclick" => {
+            with_hands(app, move |hands| {
+                hands.move_to(x, y)?;
+                hands.click(1, 2)?;
+                Ok("double-clicked".into())
+            })
+            .await
+        }
+        "right_click" | "rclick" => {
+            with_hands(app, move |hands| {
+                hands.move_to(x, y)?;
+                hands.click(3, 1)?;
+                Ok("right-clicked".into())
+            })
+            .await
+        }
+        "move" => {
+            with_hands(app, move |hands| {
+                hands.move_to(x, y)?;
+                Ok("moved".into())
+            })
+            .await
+        }
         "drag" => {
-            xdo(
-                app,
-                &[
-                    "mousemove",
-                    "--sync",
-                    &integer("x"),
-                    &integer("y"),
-                    "mousedown",
-                    "1",
-                    "mousemove",
-                    "--sync",
-                    &integer("x2"),
-                    &integer("y2"),
-                    "mouseup",
-                    "1",
-                ],
-            )
-            .await?;
-            Ok("dragged".into())
+            with_hands(app, move |hands| {
+                hands.move_to(x, y)?;
+                hands.button(1, true)?;
+                std::thread::sleep(Duration::from_millis(30));
+                hands.move_to((x + x2) / 2, (y + y2) / 2)?;
+                std::thread::sleep(Duration::from_millis(30));
+                hands.move_to(x2, y2)?;
+                std::thread::sleep(Duration::from_millis(30));
+                hands.button(1, false)?;
+                Ok("dragged".into())
+            })
+            .await
         }
         "scroll" => {
-            let clicks = step
-                .get("clicks")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
-            let button = if clicks > 0 { "4" } else { "5" };
-            xdo(
-                app,
-                &[
-                    "mousemove",
-                    "--sync",
-                    &integer("x"),
-                    &integer("y"),
-                    "click",
-                    "--repeat",
-                    &clicks.unsigned_abs().to_string(),
-                    button,
-                ],
-            )
-            .await?;
-            Ok("scrolled".into())
-        }
-        "type" => xdo(app, &["type", "--delay", "0", "--", &string("text")])
+            let clicks = integer("clicks");
+            with_hands(app, move |hands| {
+                hands.move_to(x, y)?;
+                let button = if clicks > 0 { 4 } else { 5 };
+                hands.click(button, u32::from(clicks.unsigned_abs()))?;
+                Ok("scrolled".into())
+            })
             .await
-            .map(|_| "typed".into()),
+        }
+        "type" => {
+            let content = string("text");
+            with_hands(app, move |hands| {
+                hands.type_text(&content)?;
+                Ok("typed".into())
+            })
+            .await
+        }
         "key" => {
             let combo = string("combo");
             if combo.is_empty() {
                 return Err("combo is required".into());
             }
-            xdo(app, &["key", "--clearmodifiers", &combo])
-                .await
-                .map(|_| format!("sent {combo}"))
+            with_hands(app, move |hands| {
+                hands.combo(&combo)?;
+                Ok(format!("sent {combo}"))
+            })
+            .await
         }
         "paste" => {
-            clipboard_write(app, &string("text")).await?;
-            xdo(app, &["key", "--clearmodifiers", "ctrl+v"]).await?;
-            Ok("pasted".into())
-        }
-        "clipboard_write" => clipboard_write(app, &string("text"))
+            let content = string("text");
+            let display = app.display()?;
+            blocking(move || {
+                display.clipboard.write(&content)?;
+                let mut hands = display
+                    .hands
+                    .lock()
+                    .map_err(|_| "the hands are poisoned".to_owned())?;
+                hands.combo("ctrl+v")?;
+                Ok("pasted".into())
+            })
             .await
-            .map(|_| "clipboard set".into()),
+        }
+        "clipboard_write" => {
+            let content = string("text");
+            let display = app.display()?;
+            blocking(move || {
+                display.clipboard.write(&content)?;
+                Ok("clipboard set".into())
+            })
+            .await
+        }
         "focus" => {
-            let id = string("window_id");
-            command(
-                &app.config.display,
-                "wmctrl",
-                &["-i".into(), "-a".into(), id],
-            )
-            .await?;
+            x11::activate(&app.config.display, &string("window_id"))?;
             Ok("focused".into())
         }
         "navigate" => app.browser.navigate(&string("url")).await,
@@ -284,35 +294,4 @@ async fn batch(app: &App, holder: &str, input: Input) -> ToolResult {
     json_text(
         json!({"steps":results,"capture":final_capture,"total_duration_ms":started.elapsed().as_millis()}),
     )
-}
-
-async fn xdo(app: &App, arguments: &[&str]) -> Result<(), String> {
-    let arguments: Vec<String> = arguments.iter().map(ToString::to_string).collect();
-    command(&app.config.display, "xdotool", &arguments)
-        .await
-        .map(|_| ())
-}
-
-async fn clipboard_write(app: &App, content: &str) -> Result<(), String> {
-    let mut child = tokio::process::Command::new("xclip")
-        .args(["-selection", "clipboard"])
-        .env("DISPLAY", &app.config.display)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("xclip: {error}"))?;
-    child
-        .stdin
-        .take()
-        .expect("piped above")
-        .write_all(content.as_bytes())
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = child.wait().await.map_err(|error| error.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("xclip failed".into())
-    }
 }
