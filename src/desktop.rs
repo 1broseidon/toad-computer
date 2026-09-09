@@ -1001,7 +1001,7 @@ impl Desktop {
 fn composite(image: &Image, background: u32) -> Vec<u8> {
     let [_, back_r, back_g, back_b] = background.to_be_bytes();
     let mut out = Vec::with_capacity(image.rgba.len());
-    for pixel in image.rgba.chunks_exact(4) {
+    for pixel in image.rgba.as_chunks::<4>().0 {
         let alpha = u32::from(pixel[3]);
         let blend = |fore: u8, back: u8| -> u8 {
             ((u32::from(fore) * alpha + u32::from(back) * (255 - alpha)) / 255) as u8
@@ -1030,11 +1030,15 @@ fn decode_png(bytes: &[u8]) -> Result<Image, String> {
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => pixels.to_vec(),
         png::ColorType::Rgb => pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         png::ColorType::GrayscaleAlpha => pixels
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
