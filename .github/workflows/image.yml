@@ -71,9 +71,12 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.arch }}
           # A cache that cannot be written is a slower build, not a failed one.
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max,ignore-error=true
+      # An artifact path may not carry a colon, so the digest is filed
+      # without its `sha256:` and gets it back when the manifest is made.
       - run: |
           mkdir -p digests
-          touch "digests/${{ steps.build.outputs.digest }}"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v7
         with:
           name: digest-${{ matrix.arch }}
@@ -100,6 +103,6 @@ jobs:
           tags=""
           for tag in $(echo "${{ needs.version.outputs.tags }}" | tr ',' ' '); do tags="$tags -t $tag"; done
           digests=""
-          for digest in digests/*; do digests="$digests ${IMAGE}@$(basename "$digest")"; done
+          for digest in digests/*; do digests="$digests ${IMAGE}@sha256:$(basename "$digest")"; done
           docker buildx imagetools create $tags $digests
       - run: docker buildx imagetools inspect "$(echo "${{ needs.version.outputs.tags }}" | cut -d, -f1)"
