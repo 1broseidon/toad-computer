@@ -69,7 +69,8 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+          # A cache that cannot be written is a slower build, not a failed one.
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max,ignore-error=true
       - run: |
           mkdir -p digests
           touch "digests/${{ steps.build.outputs.digest }}"
